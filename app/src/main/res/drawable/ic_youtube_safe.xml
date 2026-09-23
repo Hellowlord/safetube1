@@ -1,0 +1,31 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- YouTube Red Pill / Rounded Rectangle Base -->
+    <path
+        android:fillColor="#FF0000"
+        android:pathData="M8,12 C8,7.58 11.58,4 16,4 L32,4 C36.42,4 40,7.58 40,12 L40,28 C40,32.42 36.42,36 32,36 L16,36 C11.58,36 8,32.42 8,28 Z" />
+    
+    <!-- YouTube White Play Triangle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,13 L31,20 L20,27 Z" />
+
+    <!-- Safe Shield Badge in Bottom Right -->
+    <path
+        android:fillColor="#10B981"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:pathData="M34,26 C34,26 42,27.5 42,33 C42,39.5 34,44 34,44 C34,44 26,39.5 26,33 C26,27.5 34,26 34,26 Z" />
+    
+    <!-- White Checkmark in Shield -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M30,34 L33,37 L38,31" />
+</vector>

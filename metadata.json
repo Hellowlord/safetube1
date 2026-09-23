@@ -1,0 +1,6 @@
+{
+  "name": "SafeTube",
+  "description": "Safe video player featuring local Room watch history, family sign-in, account switching, curated cooking, music, and creator videos, autoplaying shorts, and zero ads.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
