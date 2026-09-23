@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.models.VideoItem
+import com.example.util.YouTubeEmbedPlayer
 import com.example.ui.theme.SafeBlue
 import com.example.ui.theme.SafeGreen
 import kotlin.math.roundToInt
@@ -160,6 +161,19 @@ fun FloatingPipPlayer(
                                 }
                                 webChromeClient = WebChromeClient()
                                 webViewClient = object : WebViewClient() {
+                                    // YouTube requires an HTTP Referer on the /embed/ player
+                                    // document — inject it explicitly for WebView wrappers.
+                                    override fun shouldInterceptRequest(
+                                        view: WebView?,
+                                        request: WebResourceRequest?
+                                    ): WebResourceResponse? {
+                                        val url = request?.url?.toString() ?: return null
+                                        return YouTubeEmbedPlayer.interceptEmbedRequest(
+                                            url,
+                                            settings.userAgentString
+                                        )
+                                    }
+
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                         val url = request?.url?.toString().orEmpty()
                                         if (url.contains("youtube.com") || url.contains("googlevideo.com") || url.contains("youtube-nocookie.com") || url.contains("ytimg.com")) {
@@ -173,7 +187,7 @@ fun FloatingPipPlayer(
                                     <html>
                                     <head>
                                         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-                                        <meta name="referrer" content="no-referrer-when-downgrade">
+                                        <meta name="referrer" content="strict-origin-when-cross-origin">
                                         <style>
                                             * { margin:0; padding:0; box-sizing:border-box; }
                                             html, body { background:#000; overflow:hidden; width:100%; height:100%; }
@@ -187,14 +201,15 @@ fun FloatingPipPlayer(
                                     </head>
                                     <body>
                                         <iframe 
-                                            src="https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&fs=0" 
+                                            src="${YouTubeEmbedPlayer.buildEmbedUrl(video.id, useFallbackHost = false, autoplay = true, controls = true, enableJsApi = false)}" 
+                                            referrerpolicy="strict-origin-when-cross-origin"
                                             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
                                             allowfullscreen>
                                         </iframe>
                                     </body>
                                     </html>
                                 """.trimIndent()
-                                loadDataWithBaseURL("https://www.youtube-nocookie.com", pipHtml, "text/html", "UTF-8", null)
+                                loadDataWithBaseURL(YouTubeEmbedPlayer.PRIMARY_HOST, pipHtml, "text/html", "UTF-8", null)
                             }
                         },
                         modifier = Modifier.fillMaxSize()

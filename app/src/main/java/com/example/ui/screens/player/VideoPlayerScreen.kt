@@ -113,6 +113,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.data.models.VideoItem
+import com.example.util.YouTubeEmbedPlayer
 import com.example.ui.theme.SafeBlue
 import com.example.ui.theme.SafeCoral
 import com.example.ui.theme.SafeGreen
@@ -232,6 +233,9 @@ fun VideoPlayerScreen(
     var isLiked by remember(video.id) { mutableStateOf(false) }
     var isVideoReportedUnavailable by remember(video.id) { mutableStateOf(false) }
     var isIframeGrantedMode by remember(video.id) { mutableStateOf(true) }
+    // YouTube rejects embeds whose Referer identity fails validation with error 153.
+    // Retry once on the privacy-enhanced domain before showing the restricted overlay.
+    var useFallbackEmbed by remember(video.id) { mutableStateOf(false) }
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showQualityMenu by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -886,7 +890,13 @@ fun VideoPlayerScreen(
 
         // Player HTML template with comprehensive ad-blocking CSS, script stripping and source-hiding
         val effectiveQuality = if (isBatterySaverActive) "small" else selectedQuality
-        val qualityParam = if (effectiveQuality == "auto") "" else "&vq=$effectiveQuality"
+        val qualityParam = if (effectiveQuality == "auto") "" else "vq=$effectiveQuality"
+
+        // Unified reload tag so the WebView only reloads when something actually changed
+        // (video, granted mode, quality, battery saver, or embed domain retry).
+        fun playerTag(): String =
+            "${video.id}_${isIframeGrantedMode}_${selectedQuality}_${isBatterySaverActive}_${useFallbackEmbed}"
+
         val playerHtml = """
             <!DOCTYPE html>
             <html>
@@ -1069,7 +1079,7 @@ fun VideoPlayerScreen(
             <body>
                 <iframe 
                     id="player"
-                    src="https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&fs=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&widget_referrer=https://www.youtube-nocookie.com$qualityParam" 
+                    src="${YouTubeEmbedPlayer.buildEmbedUrl(video.id, useFallbackEmbed, extraParams = qualityParam)}" 
                     referrerpolicy="strict-origin-when-cross-origin"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
                     allowfullscreen>
@@ -1205,7 +1215,7 @@ fun VideoPlayerScreen(
             <body>
                 <iframe 
                     id="player"
-                    src="https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&fs=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&widget_referrer=https://www.youtube-nocookie.com$qualityParam" 
+                    src="${YouTubeEmbedPlayer.buildEmbedUrl(video.id, useFallbackEmbed, extraParams = qualityParam)}" 
                     referrerpolicy="strict-origin-when-cross-origin"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" 
                     allowfullscreen>
@@ -1215,7 +1225,7 @@ fun VideoPlayerScreen(
         """.trimIndent()
 
         val activePlayerHtml = if (isIframeGrantedMode) grantedIframeHtml else playerHtml
-        val activeBaseUrl = "https://www.youtube-nocookie.com"
+        val activeBaseUrl = YouTubeEmbedPlayer.host(useFallbackEmbed)
 
         // VIDEO VIEWPORT
         Box(
@@ -1304,8 +1314,7 @@ fun VideoPlayerScreen(
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
-                            val currentTag = "${video.id}_${isIframeGrantedMode}_$selectedQuality"
-                            tag = currentTag
+                            tag = playerTag()
                             webViewRef = this
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1332,7 +1341,14 @@ fun VideoPlayerScreen(
                             addJavascriptInterface(
                                 SafeTubeJsBridge(
                                     onUnavailable = { errorCode ->
-                                        isVideoReportedUnavailable = true
+                                        if (errorCode == 153 && !useFallbackEmbed) {
+                                            // Error 153 = YouTube embed Referer/identity check failed.
+                                            // Retry once on the fallback domain before giving up.
+                                            useFallbackEmbed = true
+                                            isVideoReportedUnavailable = false
+                                        } else {
+                                            isVideoReportedUnavailable = true
+                                        }
                                     },
                                     onProgress = { cur, dur ->
                                         if (!isScrubbing && cur >= 0f) {
@@ -1351,6 +1367,20 @@ fun VideoPlayerScreen(
                             )
                             webChromeClient = WebChromeClient()
                             webViewClient = object : WebViewClient() {
+                                // YouTube requires an HTTP Referer on the /embed/ player document.
+                                // WebView wrapper pages don't always send it — inject it explicitly.
+                                override fun shouldInterceptRequest(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): WebResourceResponse? {
+                                    val url = request?.url?.toString() ?: return null
+                                    return YouTubeEmbedPlayer.interceptEmbedRequest(
+                                        url,
+                                        settings.userAgentString,
+                                        useFallbackEmbed
+                                    )
+                                }
+
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                     if (request?.isForMainFrame == false) {
                                         return false
@@ -1379,9 +1409,8 @@ fun VideoPlayerScreen(
                     },
                     update = { webView ->
                         webViewRef = webView
-                        val currentTag = "${video.id}_${isIframeGrantedMode}_${selectedQuality}_$isBatterySaverActive"
-                        if (webView.tag != currentTag) {
-                            webView.tag = currentTag
+                        if (webView.tag != playerTag()) {
+                            webView.tag = playerTag()
                             webView.loadDataWithBaseURL(activeBaseUrl, activePlayerHtml, "text/html", "UTF-8", null)
                         }
                     },
@@ -1814,8 +1843,8 @@ fun VideoPlayerScreen(
                                     onClick = {
                                         isIframeGrantedMode = true
                                         isVideoReportedUnavailable = false
-                                        webViewRef?.tag = "${video.id}_true_$selectedQuality"
-                                        webViewRef?.loadDataWithBaseURL("https://www.youtube-nocookie.com", grantedIframeHtml, "text/html", "UTF-8", null)
+                                        webViewRef?.tag = playerTag()
+                                        webViewRef?.loadDataWithBaseURL(activeBaseUrl, grantedIframeHtml, "text/html", "UTF-8", null)
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = SafeGreen),
                                     shape = RoundedCornerShape(18.dp),
@@ -1836,8 +1865,9 @@ fun VideoPlayerScreen(
                                 Button(
                                     onClick = {
                                         isVideoReportedUnavailable = false
-                                        webViewRef?.tag = "${video.id}_false_$selectedQuality"
-                                        webViewRef?.loadDataWithBaseURL("https://www.youtube-nocookie.com", playerHtml, "text/html", "UTF-8", null)
+                                        useFallbackEmbed = false
+                                        webViewRef?.tag = playerTag()
+                                        webViewRef?.loadDataWithBaseURL(activeBaseUrl, playerHtml, "text/html", "UTF-8", null)
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = SafeBlue),
                                     shape = RoundedCornerShape(18.dp),

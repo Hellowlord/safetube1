@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -89,6 +90,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.data.models.VideoItem
+import com.example.util.YouTubeEmbedPlayer
 import com.example.ui.theme.SafeBlue
 import com.example.ui.theme.SafeCoral
 import com.example.ui.theme.SafeGreen
@@ -325,6 +327,9 @@ private fun AutoplayShortItemPage(
     var isPlaying by remember(short.id) { mutableStateOf(true) }
     var isMuted by remember { mutableStateOf(false) }
     var isVideoUnavailable by remember(short.id) { mutableStateOf(false) }
+    // Error 153 = YouTube's embed Referer/identity validation failed. Retry once on the
+    // privacy-enhanced domain before showing the restricted banner.
+    var useFallbackEmbed by remember(short.id) { mutableStateOf(false) }
     var showPlayPauseFeedback by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
@@ -411,8 +416,14 @@ private fun AutoplayShortItemPage(
                         }
                         addJavascriptInterface(
                             SafeShortsJsBridge(
-                                onError = { _ ->
-                                    isVideoUnavailable = true
+                                onError = { errorCode ->
+                                    if (errorCode == 153 && !useFallbackEmbed) {
+                                        // Retry this short once on the fallback embed domain.
+                                        useFallbackEmbed = true
+                                        isVideoUnavailable = false
+                                    } else {
+                                        isVideoUnavailable = true
+                                    }
                                 },
                                 onReady = {
                                     isVideoUnavailable = false
@@ -422,6 +433,20 @@ private fun AutoplayShortItemPage(
                         )
                         webChromeClient = WebChromeClient()
                         webViewClient = object : WebViewClient() {
+                            // YouTube requires an HTTP Referer on the /embed/ player document.
+                            // WebView wrapper pages don't always send it — inject it explicitly.
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): WebResourceResponse? {
+                                val url = request?.url?.toString() ?: return null
+                                return YouTubeEmbedPlayer.interceptEmbedRequest(
+                                    url,
+                                    settings.userAgentString,
+                                    useFallbackEmbed
+                                )
+                            }
+
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                 if (request?.isForMainFrame == false) {
                                     return false // DO NOT BLOCK SUBFRAMES, SCRIPTS, OR MEDIA ASSETS
@@ -442,18 +467,18 @@ private fun AutoplayShortItemPage(
                             }
                         }
 
-                        val html = buildShortPlayerHtml(short.id, isBatterySaverActive)
-                        loadDataWithBaseURL("https://www.youtube-nocookie.com", html, "text/html", "UTF-8", null)
+                        val html = buildShortPlayerHtml(short.id, isBatterySaverActive, useFallbackEmbed)
+                        loadDataWithBaseURL(YouTubeEmbedPlayer.host(useFallbackEmbed), html, "text/html", "UTF-8", null)
                         webViewRef = this
                     }
                 },
                 update = { webView ->
                     webViewRef = webView
-                    val currentTag = "${short.id}_$isBatterySaverActive"
+                    val currentTag = "${short.id}_${isBatterySaverActive}_${useFallbackEmbed}"
                     if (webView.tag != currentTag) {
                         webView.tag = currentTag
-                        val html = buildShortPlayerHtml(short.id, isBatterySaverActive)
-                        webView.loadDataWithBaseURL("https://www.youtube-nocookie.com", html, "text/html", "UTF-8", null)
+                        val html = buildShortPlayerHtml(short.id, isBatterySaverActive, useFallbackEmbed)
+                        webView.loadDataWithBaseURL(YouTubeEmbedPlayer.host(useFallbackEmbed), html, "text/html", "UTF-8", null)
                     }
                     if (isBatterySaverActive) {
                         webView.evaluateJavascript("if (typeof applyPlaybackQuality === 'function') { applyPlaybackQuality('small'); }", null)
@@ -827,8 +852,20 @@ private fun ShortActionButton(
     }
 }
 
-private fun buildShortPlayerHtml(shortId: String, isBatterySaverActive: Boolean): String {
-    val qualityParam = if (isBatterySaverActive) "&vq=small" else ""
+private fun buildShortPlayerHtml(
+    shortId: String,
+    isBatterySaverActive: Boolean,
+    useFallbackHost: Boolean = false
+): String {
+    val qualityParam = if (isBatterySaverActive) "vq=small" else ""
+    val embedSrc = YouTubeEmbedPlayer.buildEmbedUrl(
+        videoId = shortId,
+        useFallbackHost = useFallbackHost,
+        autoplay = true,
+        controls = false,
+        enableJsApi = true,
+        extraParams = qualityParam
+    )
     return """
         <!DOCTYPE html>
         <html>
@@ -921,7 +958,7 @@ private fun buildShortPlayerHtml(shortId: String, isBatterySaverActive: Boolean)
                 id="player"
                 width="360"
                 height="640"
-                src="https://www.youtube-nocookie.com/embed/$shortId?autoplay=1&playsinline=1&controls=0&rel=0&modestbranding=1&fs=0&enablejsapi=1&origin=https://www.youtube-nocookie.com&widget_referrer=https://www.youtube-nocookie.com$qualityParam" 
+                src="$embedSrc" 
                 title="YouTube video player"
                 frameborder="0"
                 referrerpolicy="strict-origin-when-cross-origin"
