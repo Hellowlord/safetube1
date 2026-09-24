@@ -23,19 +23,28 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  // Keystore files are optional: the project builds out of the box even when they are
+  // absent by falling back to Android Studio's auto-generated debug keystore (~/.android/debug.keystore).
+  val releaseKeystoreFile = rootProject.file(System.getenv("KEYSTORE_PATH") ?: "my-upload-key.jks")
+  val debugKeystoreFile = rootProject.file("debug.keystore")
+  val hasReleaseSigning = releaseKeystoreFile.exists() && !System.getenv("STORE_PASSWORD").isNullOrBlank()
+
   signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+    if (hasReleaseSigning) {
+      create("release") {
+        storeFile = releaseKeystoreFile
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+    if (debugKeystoreFile.exists()) {
+      create("debugConfig") {
+        storeFile = debugKeystoreFile
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
@@ -44,9 +53,22 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      // Sign with the upload key when configured; otherwise fall back to the standard
+      // auto-generated debug key so local release builds still install.
+      // NOTE: never publish a build that was signed with the fallback debug key.
+      signingConfig = if (hasReleaseSigning) {
+        signingConfigs.getByName("release")
+      } else {
+        signingConfigs.getByName("debug")
+      }
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      signingConfig = if (debugKeystoreFile.exists()) {
+        signingConfigs.getByName("debugConfig")
+      } else {
+        signingConfigs.getByName("debug")
+      }
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
