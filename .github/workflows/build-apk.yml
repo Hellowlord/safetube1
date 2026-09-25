@@ -3,7 +3,7 @@ name: Build SafeTube APK
 on:
   push:
     branches:
-      - "arena/01a0cf6f-safetube1"
+      - "arena/**"
   workflow_dispatch: {}
 
 permissions:

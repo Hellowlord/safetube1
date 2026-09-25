@@ -1,5 +1,6 @@
 package com.example.util
 
+import android.webkit.CookieManager
 import android.webkit.WebResourceResponse
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,6 +31,18 @@ object YouTubeEmbedPlayer {
 
     /** Standard embed host (what YouTube itself hands out in its official embed code). */
     const val PRIMARY_HOST = "https://www.youtube.com"
+
+    /**
+     * Mobile User-Agent used by every player WebView AND by [interceptEmbedRequest].
+     *
+     * It is kept as a constant (instead of reading `webView.settings.userAgentString`) because
+     * `WebViewClient.shouldInterceptRequest()` runs on a background thread and ANY call into a
+     * WebView method there — including `getSettings()` — throws
+     * `RuntimeException: A WebView method was called on thread ...` via `WebView.checkThread()`
+     * and crashes the app. Never touch the WebView from that callback.
+     */
+    const val MOBILE_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
     /** Privacy-enhanced fallback host, used for the automatic retry on error 153. */
     const val FALLBACK_HOST = "https://www.youtube-nocookie.com"
@@ -90,22 +103,42 @@ object YouTubeEmbedPlayer {
     ): WebResourceResponse? {
         if (!isEmbedDocumentUrl(url)) return null
         return try {
+            val hostOrigin = host(useFallbackHost)
             val builder = Request.Builder()
                 .url(url)
-                .header("Referer", host(useFallbackHost) + "/")
+                // YouTube's embed policy (player error 153) requires the /embed/ document
+                // request to carry identification of the hosting page: both a Referer and a
+                // matching Origin. WebView does not reliably attach these around
+                // loadDataWithBaseURL() wrapper pages, so we fetch the document ourselves.
+                .header("Referer", "$hostOrigin/")
+                .header("Origin", hostOrigin)
             if (!userAgent.isNullOrBlank()) {
                 builder.header("User-Agent", userAgent)
             }
+            // Forward the WebView's cookies so YouTube serves the same document a normal
+            // browser session would get (no cookie-less consent/bot-check variants).
+            try {
+                val cookies = CookieManager.getInstance().getCookie(url)
+                if (!cookies.isNullOrEmpty()) {
+                    builder.header("Cookie", cookies)
+                }
+            } catch (_: Exception) {
+            }
             httpClient.newCall(builder.build()).execute().use { response ->
-                if (!response.isSuccessful) return null
-                val body = response.body ?: return null
+                if (!response.isSuccessful) return@use null
+                val body = response.body ?: return@use null
                 val bytes = body.bytes()
+                if (bytes.isEmpty()) return@use null
                 val contentType = response.header("Content-Type") ?: "text/html"
-                val mime = contentType.substringBefore(';').trim()
+                val mime = contentType.substringBefore(';').trim().ifBlank { "text/html" }
                 val charset = contentType.substringAfter("charset=", "")
                     .substringBefore(';').trim()
                     .ifBlank { "utf-8" }
-                WebResourceResponse(mime, charset, ByteArrayInputStream(bytes))
+                val headers = mapOf(
+                    "Access-Control-Allow-Origin" to "*",
+                    "Referrer-Policy" to "strict-origin-when-cross-origin"
+                )
+                WebResourceResponse(mime, charset, 200, "OK", headers, ByteArrayInputStream(bytes))
             }
         } catch (_: Exception) {
             // Never break playback because of the interception — fall back to normal loading.

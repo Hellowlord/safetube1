@@ -2,7 +2,9 @@ package com.example.ui.components
 
 import android.annotation.SuppressLint
 import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -157,7 +159,7 @@ fun FloatingPipPlayer(
                                     mediaPlaybackRequiresUserGesture = false
                                     loadWithOverviewMode = true
                                     useWideViewPort = true
-                                    userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                    userAgentString = YouTubeEmbedPlayer.MOBILE_USER_AGENT
                                 }
                                 webChromeClient = WebChromeClient()
                                 webViewClient = object : WebViewClient() {
@@ -167,11 +169,46 @@ fun FloatingPipPlayer(
                                         view: WebView?,
                                         request: WebResourceRequest?
                                     ): WebResourceResponse? {
+                                        // NOTE: shouldInterceptRequest() runs on a WebView background
+                                        // thread. Calling ANY WebView method here (e.g. view.settings)
+                                        // throws via WebView.checkThread() and crashes the app.
                                         val url = request?.url?.toString() ?: return null
-                                        return YouTubeEmbedPlayer.interceptEmbedRequest(
-                                            url,
-                                            settings.userAgentString
-                                        )
+                                        return try {
+                                            YouTubeEmbedPlayer.interceptEmbedRequest(
+                                                url,
+                                                YouTubeEmbedPlayer.MOBILE_USER_AGENT
+                                            )
+                                        } catch (_: Throwable) {
+                                            // Never let request interception kill the app.
+                                            null
+                                        }
+                                    }
+
+                                    override fun onReceivedError(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                        error: WebResourceError?
+                                    ) {
+                                        // ERR_ABORTED (-3) fires for cancelled or re-issued loads — not a real failure.
+                                        if (error?.errorCode == -3) return
+                                        if (request?.isForMainFrame == true) {
+                                            // Never show the raw "Webpage not available" system page.
+                                            view?.loadDataWithBaseURL(
+                                                null,
+                                                "<html><body style=\"background: black;\"></body></html>",
+                                                "text/html",
+                                                null,
+                                                null
+                                            )
+                                        }
+                                    }
+
+                                    override fun onRenderProcessGone(
+                                        view: WebView?,
+                                        detail: RenderProcessGoneDetail?
+                                    ): Boolean {
+                                        // A WebView renderer crash must never take down the whole app.
+                                        return true
                                     }
 
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -190,7 +227,7 @@ fun FloatingPipPlayer(
                                         <meta name="referrer" content="strict-origin-when-cross-origin">
                                         <style>
                                             * { margin:0; padding:0; box-sizing:border-box; }
-                                            html, body { background:#000; overflow:hidden; width:100%; height:100%; }
+                                            html, body { background: black; overflow:hidden; width:100%; height:100%; }
                                             iframe { width:100%; height:100%; border:0; display:block; }
                                             .ytp-youtube-button, .ytp-watermark, .ytp-impression-link, 
                                             .ytp-title-link, .ytp-ce-element, .ytp-pause-overlay, 
@@ -209,7 +246,16 @@ fun FloatingPipPlayer(
                                     </body>
                                     </html>
                                 """.trimIndent()
-                                loadDataWithBaseURL(YouTubeEmbedPlayer.PRIMARY_HOST, pipHtml, "text/html", "UTF-8", null)
+                                loadDataWithBaseURL(YouTubeEmbedPlayer.PRIMARY_HOST, pipHtml, "text/html", null, null)
+                            }
+                        },
+                        onRelease = { webView ->
+                            try {
+                                (webView.parent as? ViewGroup)?.removeView(webView)
+                                webView.stopLoading()
+                                webView.destroy()
+                            } catch (_: Exception) {
+                                // Teardown must never crash the app.
                             }
                         },
                         modifier = Modifier.fillMaxSize()

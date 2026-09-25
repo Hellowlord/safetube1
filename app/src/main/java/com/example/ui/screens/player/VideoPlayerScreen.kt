@@ -6,6 +6,8 @@ import android.net.Uri
 import android.view.ViewGroup
 import java.io.ByteArrayInputStream
 import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -232,6 +234,9 @@ fun VideoPlayerScreen(
     val context = LocalContext.current
     var isLiked by remember(video.id) { mutableStateOf(false) }
     var isVideoReportedUnavailable by remember(video.id) { mutableStateOf(false) }
+    // Set only when the WebView itself fails to load the player page (NOT for YouTube
+    // restriction errors — those use isVideoReportedUnavailable and the creator copy).
+    var isPlayerLoadFailed by remember(video.id) { mutableStateOf(false) }
     var isIframeGrantedMode by remember(video.id) { mutableStateOf(true) }
     // YouTube rejects embeds whose Referer identity fails validation with error 153.
     // Retry once on the privacy-enhanced domain before showing the restricted overlay.
@@ -823,6 +828,7 @@ fun VideoPlayerScreen(
                         onClick = {
                             isIframeGrantedMode = !isIframeGrantedMode
                             isVideoReportedUnavailable = false
+                            isPlayerLoadFailed = false
                         },
                         modifier = Modifier.testTag("iframe_player_toggle")
                     ) {
@@ -905,7 +911,7 @@ fun VideoPlayerScreen(
                 <meta name="referrer" content="strict-origin-when-cross-origin">
                 <style>
                     * { margin: 0; padding: 0; box-sizing: border-box; }
-                    html, body { background: #000; overflow: hidden; width: 100%; height: 100%; }
+                    html, body { background: black; overflow: hidden; width: 100%; height: 100%; }
                     iframe { width: 100%; height: 100%; border: 0; display: block; }
                     /* Comprehensive Ad-Block & Source Hiding Rules */
                     .ytp-youtube-button, .ytp-watermark, .ytp-impression-link, 
@@ -1025,15 +1031,15 @@ fun VideoPlayerScreen(
                                 if (data.event === 'infoDelivery' && data.info) {
                                     var cur = data.info.currentTime;
                                     var dur = data.info.duration;
-                                    if (cur !== undefined || dur !== undefined) {
-                                        var c = cur !== undefined ? cur : -1;
-                                        var d = dur !== undefined ? dur : -1;
+                                    if (typeof cur === 'number' || typeof dur === 'number') {
+                                        var c = typeof cur === 'number' ? cur : -1;
+                                        var d = typeof dur === 'number' ? dur : -1;
                                         if (window.SafeTubeAndroidBridge) {
                                             window.SafeTubeAndroidBridge.updateProgress(c, d);
                                         }
                                     }
                                 }
-                                if (data.event === 'onStateChange' && data.info !== undefined) {
+                                if (data.event === 'onStateChange' && typeof data.info === 'number') {
                                     if (window.SafeTubeAndroidBridge) {
                                         window.SafeTubeAndroidBridge.onPlaybackStateChange(data.info);
                                     }
@@ -1097,7 +1103,7 @@ fun VideoPlayerScreen(
                 <meta name="referrer" content="strict-origin-when-cross-origin">
                 <style>
                     * { margin: 0; padding: 0; box-sizing: border-box; }
-                    html, body { background: #000; overflow: hidden; width: 100%; height: 100%; }
+                    html, body { background: black; overflow: hidden; width: 100%; height: 100%; }
                     iframe { width: 100%; height: 100%; border: 0; display: block; }
                     .ytp-youtube-button, .ytp-watermark, .ytp-impression-link, 
                     .ytp-title-link, .ytp-ce-element, .ytp-pause-overlay, 
@@ -1178,15 +1184,15 @@ fun VideoPlayerScreen(
                                 if (data.event === 'infoDelivery' && data.info) {
                                     var cur = data.info.currentTime;
                                     var dur = data.info.duration;
-                                    if (cur !== undefined || dur !== undefined) {
-                                        var c = cur !== undefined ? cur : -1;
-                                        var d = dur !== undefined ? dur : -1;
+                                    if (typeof cur === 'number' || typeof dur === 'number') {
+                                        var c = typeof cur === 'number' ? cur : -1;
+                                        var d = typeof dur === 'number' ? dur : -1;
                                         if (window.SafeTubeAndroidBridge) {
                                             window.SafeTubeAndroidBridge.updateProgress(c, d);
                                         }
                                     }
                                 }
-                                if (data.event === 'onStateChange' && data.info !== undefined) {
+                                if (data.event === 'onStateChange' && typeof data.info === 'number') {
                                     if (window.SafeTubeAndroidBridge) {
                                         window.SafeTubeAndroidBridge.onPlaybackStateChange(data.info);
                                     }
@@ -1336,7 +1342,7 @@ fun VideoPlayerScreen(
                                 javaScriptCanOpenWindowsAutomatically = false
                                 setSupportMultipleWindows(false)
                                 loadsImagesAutomatically = true
-                                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                userAgentString = YouTubeEmbedPlayer.MOBILE_USER_AGENT
                             }
                             addJavascriptInterface(
                                 SafeTubeJsBridge(
@@ -1346,7 +1352,9 @@ fun VideoPlayerScreen(
                                             // Retry once on the fallback domain before giving up.
                                             useFallbackEmbed = true
                                             isVideoReportedUnavailable = false
+                                            isPlayerLoadFailed = false
                                         } else {
+                                            // Genuine YouTube player restriction (101/150/152...).
                                             isVideoReportedUnavailable = true
                                         }
                                     },
@@ -1373,12 +1381,46 @@ fun VideoPlayerScreen(
                                     view: WebView?,
                                     request: WebResourceRequest?
                                 ): WebResourceResponse? {
+                                    // NOTE: shouldInterceptRequest() runs on a WebView background
+                                    // thread. Calling ANY WebView method here (e.g. view.settings)
+                                    // throws via WebView.checkThread() and crashes the app — this
+                                    // was the crash that fired every time a video or Short opened.
                                     val url = request?.url?.toString() ?: return null
-                                    return YouTubeEmbedPlayer.interceptEmbedRequest(
-                                        url,
-                                        settings.userAgentString,
-                                        useFallbackEmbed
-                                    )
+                                    return try {
+                                        YouTubeEmbedPlayer.interceptEmbedRequest(
+                                            url,
+                                            YouTubeEmbedPlayer.MOBILE_USER_AGENT,
+                                            useFallbackEmbed
+                                        )
+                                    } catch (_: Throwable) {
+                                        // Never let request interception kill the app.
+                                        null
+                                    }
+                                }
+
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?
+                                ) {
+                                    // ERR_ABORTED (-3) fires for cancelled or re-issued loads (e.g.
+                                    // retry races) and is not a real failure — never show an overlay for it.
+                                    if (error?.errorCode == -3) return
+                                    if (request?.isForMainFrame == true) {
+                                        // Never show the raw "Webpage not available" system page —
+                                        // surface the in-app load-failure overlay instead. The
+                                        // "restricted by creator" copy is reserved for real YouTube
+                                        // player errors reported through the JS bridge above.
+                                        isPlayerLoadFailed = true
+                                    }
+                                }
+
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
+                                    // A WebView renderer crash must never take down the whole app.
+                                    return true
                                 }
 
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1404,14 +1446,26 @@ fun VideoPlayerScreen(
                                 }
                             }
 
-                            loadDataWithBaseURL(activeBaseUrl, activePlayerHtml, "text/html", "UTF-8", null)
+loadDataWithBaseURL(activeBaseUrl, activePlayerHtml, "text/html", null, null)
                         }
                     },
                     update = { webView ->
                         webViewRef = webView
                         if (webView.tag != playerTag()) {
                             webView.tag = playerTag()
-                            webView.loadDataWithBaseURL(activeBaseUrl, activePlayerHtml, "text/html", "UTF-8", null)
+                            webView.loadDataWithBaseURL(activeBaseUrl, activePlayerHtml, "text/html", null, null)
+                        }
+                    },
+                    onRelease = { webView ->
+                        if (webViewRef === webView) {
+                            webViewRef = null
+                        }
+                        try {
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            webView.stopLoading()
+                            webView.destroy()
+                        } catch (_: Exception) {
+                            // Teardown must never crash the app.
                         }
                     },
                     modifier = Modifier.fillMaxSize()
@@ -1419,7 +1473,7 @@ fun VideoPlayerScreen(
             }
 
             // Viewport Recovery Overlay for Restricted or Unavailable Videos (Never show raw YouTube 152-4 error!)
-            if (isVideoReportedUnavailable && !isOfflineMode) {
+            if ((isVideoReportedUnavailable || isPlayerLoadFailed) && !isOfflineMode) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -1439,14 +1493,18 @@ fun VideoPlayerScreen(
                             modifier = Modifier.size(38.dp)
                         )
                         Text(
-                            text = "Video Restricted by YouTube Creator",
+                            text = if (isPlayerLoadFailed) "Player Couldn't Load" else "Video Restricted by YouTube Creator",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp,
                             textAlign = TextAlign.Center
                         )
                         Text(
-                            text = "Playback in third-party mobile apps has been disabled by the video owner (Error 152/150). You can play it directly in the YouTube app or try Granted IFrame mode.",
+                            text = if (isPlayerLoadFailed) {
+                                "The video player failed to load. Check your connection, then tap Retry."
+                            } else {
+                                "Playback in third-party mobile apps has been disabled by the video owner (Error 152/150). You can play it directly in the YouTube app or try Granted IFrame mode."
+                            },
                             color = Color(0xFFD1D5DB),
                             fontSize = 12.sp,
                             lineHeight = 16.sp,
@@ -1456,6 +1514,22 @@ fun VideoPlayerScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            if (isPlayerLoadFailed) {
+                                Button(
+                                    onClick = {
+                                        isVideoReportedUnavailable = false
+                                        isPlayerLoadFailed = false
+                                        // Flip embed host so the update block reloads the player.
+                                        useFallbackEmbed = !useFallbackEmbed
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = SafeBlue),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Retry", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                             Button(
                                 onClick = {
                                     try {
@@ -1475,6 +1549,7 @@ fun VideoPlayerScreen(
                                     onClick = {
                                         isIframeGrantedMode = true
                                         isVideoReportedUnavailable = false
+                                        isPlayerLoadFailed = false
                                     },
                                     shape = RoundedCornerShape(10.dp)
                                 ) {
@@ -1843,8 +1918,9 @@ fun VideoPlayerScreen(
                                     onClick = {
                                         isIframeGrantedMode = true
                                         isVideoReportedUnavailable = false
+                                        isPlayerLoadFailed = false
                                         webViewRef?.tag = playerTag()
-                                        webViewRef?.loadDataWithBaseURL(activeBaseUrl, grantedIframeHtml, "text/html", "UTF-8", null)
+                                        webViewRef?.loadDataWithBaseURL(activeBaseUrl, grantedIframeHtml, "text/html", null, null)
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = SafeGreen),
                                     shape = RoundedCornerShape(18.dp),
@@ -1865,9 +1941,10 @@ fun VideoPlayerScreen(
                                 Button(
                                     onClick = {
                                         isVideoReportedUnavailable = false
+                                        isPlayerLoadFailed = false
                                         useFallbackEmbed = false
                                         webViewRef?.tag = playerTag()
-                                        webViewRef?.loadDataWithBaseURL(activeBaseUrl, playerHtml, "text/html", "UTF-8", null)
+                                        webViewRef?.loadDataWithBaseURL(activeBaseUrl, playerHtml, "text/html", null, null)
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = SafeBlue),
                                     shape = RoundedCornerShape(18.dp),

@@ -4,7 +4,9 @@ import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -47,6 +49,7 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ThumbDown
@@ -327,6 +330,9 @@ private fun AutoplayShortItemPage(
     var isPlaying by remember(short.id) { mutableStateOf(true) }
     var isMuted by remember { mutableStateOf(false) }
     var isVideoUnavailable by remember(short.id) { mutableStateOf(false) }
+    // Set only when the WebView itself fails to load the player page (NOT for YouTube
+    // restriction errors — those use isVideoUnavailable and the "Restricted by Creator" copy).
+    var isPlayerLoadFailed by remember(short.id) { mutableStateOf(false) }
     // Error 153 = YouTube's embed Referer/identity validation failed. Retry once on the
     // privacy-enhanced domain before showing the restricted banner.
     var useFallbackEmbed by remember(short.id) { mutableStateOf(false) }
@@ -357,7 +363,11 @@ private fun AutoplayShortItemPage(
 
     DisposableEffect(isActive) {
         onDispose {
-            webViewRef?.evaluateJavascript("if (typeof pauseShort === 'function') { pauseShort(); }", null)
+            try {
+                webViewRef?.evaluateJavascript("if (typeof pauseShort === 'function') { pauseShort(); }", null)
+            } catch (_: Exception) {
+                // WebView may already have been released during teardown.
+            }
         }
     }
 
@@ -412,7 +422,7 @@ private fun AutoplayShortItemPage(
                             setSupportMultipleWindows(false)
                             loadsImagesAutomatically = true
                             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                            userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                            userAgentString = YouTubeEmbedPlayer.MOBILE_USER_AGENT
                         }
                         addJavascriptInterface(
                             SafeShortsJsBridge(
@@ -421,12 +431,15 @@ private fun AutoplayShortItemPage(
                                         // Retry this short once on the fallback embed domain.
                                         useFallbackEmbed = true
                                         isVideoUnavailable = false
+                                        isPlayerLoadFailed = false
                                     } else {
+                                        // Genuine YouTube player restriction (101/150/152...).
                                         isVideoUnavailable = true
                                     }
                                 },
                                 onReady = {
                                     isVideoUnavailable = false
+                                    isPlayerLoadFailed = false
                                 }
                             ),
                             "SafeTubeShortsBridge"
@@ -439,12 +452,46 @@ private fun AutoplayShortItemPage(
                                 view: WebView?,
                                 request: WebResourceRequest?
                             ): WebResourceResponse? {
+                                // NOTE: shouldInterceptRequest() runs on a WebView background
+                                // thread. Calling ANY WebView method here (e.g. view.settings)
+                                // throws via WebView.checkThread() and crashes the app — this
+                                // was the crash that fired every time a Short opened.
                                 val url = request?.url?.toString() ?: return null
-                                return YouTubeEmbedPlayer.interceptEmbedRequest(
-                                    url,
-                                    settings.userAgentString,
-                                    useFallbackEmbed
-                                )
+                                return try {
+                                    YouTubeEmbedPlayer.interceptEmbedRequest(
+                                        url,
+                                        YouTubeEmbedPlayer.MOBILE_USER_AGENT,
+                                        useFallbackEmbed
+                                    )
+                                } catch (_: Throwable) {
+                                    // Never let request interception kill the app.
+                                    null
+                                }
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
+                                // ERR_ABORTED (-3) fires for cancelled or re-issued loads (e.g.
+                                // retry races) and is not a real failure — never show a banner for it.
+                                if (error?.errorCode == -3) return
+                                if (request?.isForMainFrame == true) {
+                                    // Never show the raw "Webpage not available" system page —
+                                    // surface the in-app load-failure banner instead. The
+                                    // "restricted by creator" copy is reserved for real YouTube
+                                    // player errors reported through the JS bridge above.
+                                    isPlayerLoadFailed = true
+                                }
+                            }
+
+                            override fun onRenderProcessGone(
+                                view: WebView?,
+                                detail: RenderProcessGoneDetail?
+                            ): Boolean {
+                                // A WebView renderer crash must never take down the whole app.
+                                return true
                             }
 
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -468,7 +515,8 @@ private fun AutoplayShortItemPage(
                         }
 
                         val html = buildShortPlayerHtml(short.id, isBatterySaverActive, useFallbackEmbed)
-                        loadDataWithBaseURL(YouTubeEmbedPlayer.host(useFallbackEmbed), html, "text/html", "UTF-8", null)
+loadDataWithBaseURL(YouTubeEmbedPlayer.host(useFallbackEmbed), html, "text/html", null, null)
+                        tag = "${short.id}_${isBatterySaverActive}_${useFallbackEmbed}"
                         webViewRef = this
                     }
                 },
@@ -478,10 +526,22 @@ private fun AutoplayShortItemPage(
                     if (webView.tag != currentTag) {
                         webView.tag = currentTag
                         val html = buildShortPlayerHtml(short.id, isBatterySaverActive, useFallbackEmbed)
-                        webView.loadDataWithBaseURL(YouTubeEmbedPlayer.host(useFallbackEmbed), html, "text/html", "UTF-8", null)
+                        webView.loadDataWithBaseURL(YouTubeEmbedPlayer.host(useFallbackEmbed), html, "text/html", null, null)
                     }
                     if (isBatterySaverActive) {
                         webView.evaluateJavascript("if (typeof applyPlaybackQuality === 'function') { applyPlaybackQuality('small'); }", null)
+                    }
+                },
+                onRelease = { webView ->
+                    if (webViewRef === webView) {
+                        webViewRef = null
+                    }
+                    try {
+                        (webView.parent as? ViewGroup)?.removeView(webView)
+                        webView.stopLoading()
+                        webView.destroy()
+                    } catch (_: Exception) {
+                        // Teardown must never crash the app.
                     }
                 },
                 modifier = Modifier.fillMaxSize()
@@ -496,7 +556,7 @@ private fun AutoplayShortItemPage(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
                 ) {
-                    if (isVideoUnavailable) return@clickable
+                    if (isVideoUnavailable || isPlayerLoadFailed) return@clickable
                     isPlaying = !isPlaying
                     showPlayPauseFeedback = true
                     if (isPlaying) {
@@ -530,8 +590,8 @@ private fun AutoplayShortItemPage(
             }
         }
 
-        // Viewport In-Card Recovery Banner if YouTube Creator has restricted embedding (Never shows raw 152-4 error!)
-        if (isVideoUnavailable) {
+        // Viewport In-Card Recovery Banner for restricted or unloadable Shorts (Never shows raw 152-4 error!)
+        if (isVideoUnavailable || isPlayerLoadFailed) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -568,7 +628,7 @@ private fun AutoplayShortItemPage(
                         }
 
                         Text(
-                            text = "Short Restricted by Creator",
+                            text = if (isPlayerLoadFailed) "Player Couldn't Load" else "Short Restricted by Creator",
                             color = Color.White,
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 17.sp,
@@ -576,7 +636,11 @@ private fun AutoplayShortItemPage(
                         )
 
                         Text(
-                            text = "The creator of this video has disabled embedded playback on third-party mobile webviews (Error 150/152).",
+                            text = if (isPlayerLoadFailed) {
+                                "The video player failed to load. Check your connection, then tap Retry."
+                            } else {
+                                "The creator of this video has disabled embedded playback on third-party mobile webviews (Error 150/152)."
+                            },
                             color = Color(0xFFD1D5DB),
                             fontSize = 12.sp,
                             lineHeight = 17.sp,
@@ -587,6 +651,26 @@ private fun AutoplayShortItemPage(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            if (isPlayerLoadFailed) {
+                                Button(
+                                    onClick = {
+                                        isVideoUnavailable = false
+                                        isPlayerLoadFailed = false
+                                        // Flip embed host so the update block reloads the player.
+                                        useFallbackEmbed = !useFallbackEmbed
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = SafeCoral),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(44.dp)
+                                        .testTag("short_retry_button_${short.id}")
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Retry Player", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                            }
                             Button(
                                 onClick = onNextShort,
                                 colors = ButtonDefaults.buttonColors(containerColor = SafeCoral),
@@ -874,7 +958,7 @@ private fun buildShortPlayerHtml(
             <meta name="referrer" content="strict-origin-when-cross-origin">
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
-                html, body { background: #000; overflow: hidden; width: 100%; height: 100%; }
+                html, body { background: black; overflow: hidden; width: 100%; height: 100%; }
                 iframe { width: 100%; height: 100%; border: 0; display: block; object-fit: cover; }
                 .ytp-youtube-button, .ytp-watermark, .ytp-impression-link, 
                 .ytp-title-link, .ytp-ce-element, .ytp-pause-overlay, 
@@ -969,4 +1053,5 @@ private fun buildShortPlayerHtml(
         </html>
     """.trimIndent()
 }
+
 
