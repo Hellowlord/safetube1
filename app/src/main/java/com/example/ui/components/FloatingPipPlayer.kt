@@ -2,7 +2,9 @@ package com.example.ui.components
 
 import android.annotation.SuppressLint
 import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -180,6 +182,31 @@ fun FloatingPipPlayer(
                                             // Never let request interception kill the app.
                                             null
                                         }
+                                    }
+
+                                    override fun onReceivedError(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                        error: WebResourceError?
+                                    ) {
+                                        if (request?.isForMainFrame == true) {
+                                            // Never show the raw "Webpage not available" system page.
+                                            view?.loadDataWithBaseURL(
+                                                null,
+                                                "<html><body style=\"background: black;\"></body></html>",
+                                                "text/html",
+                                                "UTF-8",
+                                                null
+                                            )
+                                        }
+                                    }
+
+                                    override fun onRenderProcessGone(
+                                        view: WebView?,
+                                        detail: RenderProcessGoneDetail?
+                                    ): Boolean {
+                                        // A WebView renderer crash must never take down the whole app.
+                                        return true
                                     }
 
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {

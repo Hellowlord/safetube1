@@ -4,7 +4,9 @@ import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -458,6 +460,26 @@ private fun AutoplayShortItemPage(
                                     // Never let request interception kill the app.
                                     null
                                 }
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
+                                if (request?.isForMainFrame == true) {
+                                    // Never show the raw "Webpage not available" system page —
+                                    // surface the in-app recovery banner instead.
+                                    isVideoUnavailable = true
+                                }
+                            }
+
+                            override fun onRenderProcessGone(
+                                view: WebView?,
+                                detail: RenderProcessGoneDetail?
+                            ): Boolean {
+                                // A WebView renderer crash must never take down the whole app.
+                                return true
                             }
 
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {

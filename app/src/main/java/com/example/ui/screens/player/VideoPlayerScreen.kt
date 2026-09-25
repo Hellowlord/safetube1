@@ -6,6 +6,8 @@ import android.net.Uri
 import android.view.ViewGroup
 import java.io.ByteArrayInputStream
 import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -1025,15 +1027,15 @@ fun VideoPlayerScreen(
                                 if (data.event === 'infoDelivery' && data.info) {
                                     var cur = data.info.currentTime;
                                     var dur = data.info.duration;
-                                    if (cur !== undefined || dur !== undefined) {
-                                        var c = cur !== undefined ? cur : -1;
-                                        var d = dur !== undefined ? dur : -1;
+                                    if (typeof cur === 'number' || typeof dur === 'number') {
+                                        var c = typeof cur === 'number' ? cur : -1;
+                                        var d = typeof dur === 'number' ? dur : -1;
                                         if (window.SafeTubeAndroidBridge) {
                                             window.SafeTubeAndroidBridge.updateProgress(c, d);
                                         }
                                     }
                                 }
-                                if (data.event === 'onStateChange' && data.info !== undefined) {
+                                if (data.event === 'onStateChange' && typeof data.info === 'number') {
                                     if (window.SafeTubeAndroidBridge) {
                                         window.SafeTubeAndroidBridge.onPlaybackStateChange(data.info);
                                     }
@@ -1178,15 +1180,15 @@ fun VideoPlayerScreen(
                                 if (data.event === 'infoDelivery' && data.info) {
                                     var cur = data.info.currentTime;
                                     var dur = data.info.duration;
-                                    if (cur !== undefined || dur !== undefined) {
-                                        var c = cur !== undefined ? cur : -1;
-                                        var d = dur !== undefined ? dur : -1;
+                                    if (typeof cur === 'number' || typeof dur === 'number') {
+                                        var c = typeof cur === 'number' ? cur : -1;
+                                        var d = typeof dur === 'number' ? dur : -1;
                                         if (window.SafeTubeAndroidBridge) {
                                             window.SafeTubeAndroidBridge.updateProgress(c, d);
                                         }
                                     }
                                 }
-                                if (data.event === 'onStateChange' && data.info !== undefined) {
+                                if (data.event === 'onStateChange' && typeof data.info === 'number') {
                                     if (window.SafeTubeAndroidBridge) {
                                         window.SafeTubeAndroidBridge.onPlaybackStateChange(data.info);
                                     }
@@ -1388,6 +1390,26 @@ fun VideoPlayerScreen(
                                         // Never let request interception kill the app.
                                         null
                                     }
+                                }
+
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?
+                                ) {
+                                    if (request?.isForMainFrame == true) {
+                                        // Never show the raw "Webpage not available" system page —
+                                        // surface the in-app recovery overlay instead.
+                                        isVideoReportedUnavailable = true
+                                    }
+                                }
+
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
+                                    // A WebView renderer crash must never take down the whole app.
+                                    return true
                                 }
 
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
