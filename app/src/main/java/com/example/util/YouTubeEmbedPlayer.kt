@@ -31,6 +31,18 @@ object YouTubeEmbedPlayer {
     /** Standard embed host (what YouTube itself hands out in its official embed code). */
     const val PRIMARY_HOST = "https://www.youtube.com"
 
+    /**
+     * Mobile User-Agent used by every player WebView AND by [interceptEmbedRequest].
+     *
+     * It is kept as a constant (instead of reading `webView.settings.userAgentString`) because
+     * `WebViewClient.shouldInterceptRequest()` runs on a background thread and ANY call into a
+     * WebView method there — including `getSettings()` — throws
+     * `RuntimeException: A WebView method was called on thread ...` via `WebView.checkThread()`
+     * and crashes the app. Never touch the WebView from that callback.
+     */
+    const val MOBILE_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+
     /** Privacy-enhanced fallback host, used for the automatic retry on error 153. */
     const val FALLBACK_HOST = "https://www.youtube-nocookie.com"
 

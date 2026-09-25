@@ -1336,7 +1336,7 @@ fun VideoPlayerScreen(
                                 javaScriptCanOpenWindowsAutomatically = false
                                 setSupportMultipleWindows(false)
                                 loadsImagesAutomatically = true
-                                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                userAgentString = YouTubeEmbedPlayer.MOBILE_USER_AGENT
                             }
                             addJavascriptInterface(
                                 SafeTubeJsBridge(
@@ -1373,12 +1373,21 @@ fun VideoPlayerScreen(
                                     view: WebView?,
                                     request: WebResourceRequest?
                                 ): WebResourceResponse? {
+                                    // NOTE: shouldInterceptRequest() runs on a WebView background
+                                    // thread. Calling ANY WebView method here (e.g. view.settings)
+                                    // throws via WebView.checkThread() and crashes the app — this
+                                    // was the crash that fired every time a video or Short opened.
                                     val url = request?.url?.toString() ?: return null
-                                    return YouTubeEmbedPlayer.interceptEmbedRequest(
-                                        url,
-                                        settings.userAgentString,
-                                        useFallbackEmbed
-                                    )
+                                    return try {
+                                        YouTubeEmbedPlayer.interceptEmbedRequest(
+                                            url,
+                                            YouTubeEmbedPlayer.MOBILE_USER_AGENT,
+                                            useFallbackEmbed
+                                        )
+                                    } catch (_: Throwable) {
+                                        // Never let request interception kill the app.
+                                        null
+                                    }
                                 }
 
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1412,6 +1421,18 @@ fun VideoPlayerScreen(
                         if (webView.tag != playerTag()) {
                             webView.tag = playerTag()
                             webView.loadDataWithBaseURL(activeBaseUrl, activePlayerHtml, "text/html", "UTF-8", null)
+                        }
+                    },
+                    onRelease = { webView ->
+                        if (webViewRef === webView) {
+                            webViewRef = null
+                        }
+                        try {
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            webView.stopLoading()
+                            webView.destroy()
+                        } catch (_: Exception) {
+                            // Teardown must never crash the app.
                         }
                     },
                     modifier = Modifier.fillMaxSize()
