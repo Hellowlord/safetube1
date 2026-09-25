@@ -189,13 +189,15 @@ fun FloatingPipPlayer(
                                         request: WebResourceRequest?,
                                         error: WebResourceError?
                                     ) {
+                                        // ERR_ABORTED (-3) fires for cancelled or re-issued loads — not a real failure.
+                                        if (error?.errorCode == -3) return
                                         if (request?.isForMainFrame == true) {
                                             // Never show the raw "Webpage not available" system page.
                                             view?.loadDataWithBaseURL(
                                                 null,
                                                 "<html><body style=\"background: black;\"></body></html>",
                                                 "text/html",
-                                                "UTF-8",
+                                                null,
                                                 null
                                             )
                                         }
@@ -225,7 +227,7 @@ fun FloatingPipPlayer(
                                         <meta name="referrer" content="strict-origin-when-cross-origin">
                                         <style>
                                             * { margin:0; padding:0; box-sizing:border-box; }
-                                            html, body { background:#000; overflow:hidden; width:100%; height:100%; }
+                                            html, body { background: black; overflow:hidden; width:100%; height:100%; }
                                             iframe { width:100%; height:100%; border:0; display:block; }
                                             .ytp-youtube-button, .ytp-watermark, .ytp-impression-link, 
                                             .ytp-title-link, .ytp-ce-element, .ytp-pause-overlay, 
@@ -244,7 +246,7 @@ fun FloatingPipPlayer(
                                     </body>
                                     </html>
                                 """.trimIndent()
-                                loadDataWithBaseURL(YouTubeEmbedPlayer.PRIMARY_HOST, pipHtml, "text/html", "UTF-8", null)
+                                loadDataWithBaseURL(YouTubeEmbedPlayer.PRIMARY_HOST, pipHtml, "text/html", null, null)
                             }
                         },
                         onRelease = { webView ->
